@@ -753,7 +753,7 @@ describe("Admin API #" .. strategy, function()
           },
           headers = { ["Content-Type"] = "application/json" }
         })
-        assert.response(res).has.status(204)
+        assert.response(res).has.status(200)
 
         local res = assert(client:send {
           method = "GET",

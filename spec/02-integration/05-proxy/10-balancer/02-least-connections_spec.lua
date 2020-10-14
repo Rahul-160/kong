@@ -198,7 +198,7 @@ for _, strategy in helpers.each_strategy() do
           },
         })
         assert.is_nil(err)
-        assert.same(204, res.status)
+        assert.same(200, res.status)
         api_client:close()
 
         api_client = helpers.admin_client()

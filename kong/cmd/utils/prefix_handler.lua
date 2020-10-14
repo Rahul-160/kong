@@ -19,6 +19,84 @@ local ffi = require "ffi"
 local bit = require "bit"
 local nginx_signals = require "kong.cmd.utils.nginx_signals"
 
+
+local DHPARAMS = {
+  -- https://ssl-config.mozilla.org/ffdhe2048.txt
+  ffdhe2048 = [[
+-----BEGIN DH PARAMETERS-----
+MIIBCAKCAQEA//////////+t+FRYortKmq/cViAnPTzx2LnFg84tNpWp4TZBFGQz
++8yTnc4kmz75fS/jY2MMddj2gbICrsRhetPfHtXV/WVhJDP1H18GbtCFY2VVPe0a
+87VXE15/V8k1mE8McODmi3fipona8+/och3xWKE2rec1MKzKT0g6eXq8CrGCsyT7
+YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
+7MA0BM0oNC9hkXL+nOmFg/+OTxIy7vKBg8P+OxtMb61zO7X8vC7CIAXFjvGDfRaD
+ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
+-----END DH PARAMETERS-----
+]],
+  -- https://ssl-config.mozilla.org/ffdhe4096.txt
+  ffdhe4096 = [[
+-----BEGIN DH PARAMETERS-----
+MIICCAKCAgEA//////////+t+FRYortKmq/cViAnPTzx2LnFg84tNpWp4TZBFGQz
++8yTnc4kmz75fS/jY2MMddj2gbICrsRhetPfHtXV/WVhJDP1H18GbtCFY2VVPe0a
+87VXE15/V8k1mE8McODmi3fipona8+/och3xWKE2rec1MKzKT0g6eXq8CrGCsyT7
+YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
+7MA0BM0oNC9hkXL+nOmFg/+OTxIy7vKBg8P+OxtMb61zO7X8vC7CIAXFjvGDfRaD
+ssbzSibBsu/6iGtCOGEfz9zeNVs7ZRkDW7w09N75nAI4YbRvydbmyQd62R0mkff3
+7lmMsPrBhtkcrv4TCYUTknC0EwyTvEN5RPT9RFLi103TZPLiHnH1S/9croKrnJ32
+nuhtK8UiNjoNq8Uhl5sN6todv5pC1cRITgq80Gv6U93vPBsg7j/VnXwl5B0rZp4e
+8W5vUsMWTfT7eTDp5OWIV7asfV9C1p9tGHdjzx1VA0AEh/VbpX4xzHpxNciG77Qx
+iu1qHgEtnmgyqQdgCpGBMMRtx3j5ca0AOAkpmaMzy4t6Gh25PXFAADwqTs6p+Y0K
+zAqCkc3OyX3Pjsm1Wn+IpGtNtahR9EGC4caKAH5eZV9q//////////8CAQI=
+-----END DH PARAMETERS-----
+]],
+}
+
+
+local function gen_default_dhparams(kong_config)
+  local http_param_pem
+  local http_param_name = kong_config.nginx_http_ssl_dhparam
+  if http_param_name then
+    http_param_pem = DHPARAMS[http_param_name]
+  end
+
+  local stream_param_pem
+  local stream_param_name = kong_config.nginx_stream_ssl_dhparam
+  if stream_param_name then
+    stream_param_pem = DHPARAMS[stream_param_name]
+  end
+
+  if http_param_pem or stream_param_pem then
+    local ssl_path = pl_path.join(kong_config.prefix, "ssl")
+    if not pl_path.exists(ssl_path) then
+      local ok, err = pl_dir.makepath(ssl_path)
+      if not ok then
+        return nil, err
+      end
+    end
+
+    if http_param_pem then
+      local http_param_file = pl_path.join(ssl_path, http_param_name .. ".pem")
+      if not pl_path.exists(http_param_file) then
+        log.verbose("generating %s DH parameters", http_param_name)
+        local fd = assert(io.open(http_param_file, "w+b"))
+        assert(fd:write(http_param_pem))
+        fd:close()
+      end
+
+    end
+
+    if stream_param_pem then
+      local stream_param_file = pl_path.join(ssl_path, stream_param_name .. ".pem")
+      if stream_param_pem ~= http_param_pem and not pl_path.exists(stream_param_file) then
+        log.verbose("generating %s DH parameters", stream_param_name)
+        local fd = assert(io.open(stream_param_file, "w+b"))
+        assert(fd:write(stream_param_pem))
+        fd:close()
+      end
+    end
+  end
+end
+
+
 local function gen_default_ssl_cert(kong_config, target)
   -- create SSL folder
   local ok, err = pl_dir.makepath(pl_path.join(kong_config.prefix, "ssl"))
@@ -321,6 +399,13 @@ local function prepare_prefix(kong_config, nginx_custom_template_path)
     kong_config.status_ssl_cert_key = kong_config.status_ssl_cert_key_default
   end
 
+  if kong_config.proxy_ssl_enabled
+  or kong_config.admin_ssl_enabled
+  or kong_config.status_ssl_enabled
+  then
+    gen_default_dhparams(kong_config)
+  end
+
   if kong_config.lua_ssl_trusted_certificate_combined then
     gen_trusted_certs_combined_file(
       kong_config.lua_ssl_trusted_certificate_combined,
@@ -334,6 +419,24 @@ local function prepare_prefix(kong_config, nginx_custom_template_path)
   elseif ulimit < 4096 then
     log.warn([[ulimit is currently set to "%d". For better performance set it]] ..
              [[ to at least "4096" using "ulimit -n"]], ulimit)
+  end
+
+  local original_http_ssl_dhparam
+  for _, directive in pairs(kong_config.nginx_http_directives) do
+    if directive.name == "ssl_dhparam" and DHPARAMS[directive.value] then
+      original_http_ssl_dhparam = directive.value
+      directive.value = pl_path.join(kong_config.prefix, "ssl", directive.value .. ".pem")
+      break
+    end
+  end
+
+  local original_stream_ssl_dhparam
+  for _, directive in pairs(kong_config.nginx_stream_directives) do
+    if directive.name == "ssl_dhparam" and DHPARAMS[directive.value] then
+      original_stream_ssl_dhparam = directive.value
+      directive.value = pl_path.join(kong_config.prefix, "ssl", directive.value .. ".pem")
+      break
+    end
   end
 
   -- compile Nginx configurations
@@ -365,6 +468,25 @@ local function prepare_prefix(kong_config, nginx_custom_template_path)
     return nil, err
   end
   pl_file.write(kong_config.nginx_kong_stream_conf, nginx_kong_stream_conf)
+
+
+  if original_http_ssl_dhparam then
+    for _, directive in pairs(kong_config.nginx_http_directives) do
+      if directive.name == "ssl_dhparam"then
+        directive.value = original_http_ssl_dhparam
+        break
+      end
+    end
+  end
+
+  if original_stream_ssl_dhparam then
+    for _, directive in pairs(kong_config.nginx_stream_directives) do
+      if directive.name == "ssl_dhparam"then
+        directive.value = original_stream_ssl_dhparam
+        break
+      end
+    end
+  end
 
   -- testing written NGINX conf
   local ok, err = nginx_signals.check_conf(kong_config)
@@ -414,5 +536,6 @@ return {
   compile_kong_conf = compile_kong_conf,
   compile_kong_stream_conf = compile_kong_stream_conf,
   compile_nginx_conf = compile_nginx_conf,
-  gen_default_ssl_cert = gen_default_ssl_cert
+  gen_default_ssl_cert = gen_default_ssl_cert,
+  gen_default_dhparams = gen_default_dhparams,
 }
